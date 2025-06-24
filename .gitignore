@@ -1,0 +1,22 @@
+# Environnements virtuels
+venv/
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Fichiers temporaires
+*.log
+*.tmp
+*.swp
+
+# VS Code
+.vscode/
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# Docker fichiers optionnels
+*.local
