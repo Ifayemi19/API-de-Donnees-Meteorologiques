@@ -2,8 +2,9 @@ import httpx
 import os
 import asyncio
 from datetime import datetime, timedelta
+from functools import lru_cache
 
-# Coordonnées de quelques villes en dur (pour test)
+# Coordonnées de quelques villes en dur
 city_coords = {
     "Paris": {"lat": 48.8566, "lon": 2.3522},
     "London": {"lat": 51.5074, "lon": -0.1278},
@@ -11,21 +12,41 @@ city_coords = {
     "New York": {"lat": 40.7128, "lon": -74.0060}
 }
 
+@lru_cache(maxsize=100)
 def get_coordinates(city: str):
     return city_coords.get(city)
 
-# 🔸 OpenWeatherMap
+# Cache local en mémoire pour les résultats API
+temp_cache = {}
+CACHE_TTL_SECONDS = 60  # Durée de vie des données en cache
+
+def is_cache_valid(entry):
+    return datetime.now() < entry['expiry']
+
+def get_from_cache(key):
+    entry = temp_cache.get(key)
+    return entry['value'] if entry and is_cache_valid(entry) else None
+
+def set_to_cache(key, value):
+    temp_cache[key] = {
+        'value': value,
+        'expiry': datetime.now() + timedelta(seconds=CACHE_TTL_SECONDS)
+    }
+
+# ----------------------------- SERVICES -----------------------------
+
 async def get_openweathermap_data(city: str):
     api_key = os.getenv("OPENWEATHER_API_KEY")
     if not api_key:
         return None
 
+    cache_key = f"openweathermap::{city}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     url = "https://api.openweathermap.org/data/2.5/weather"
-    params = {
-        "q": city,
-        "appid": api_key,
-        "units": "metric"
-    }
+    params = {"q": city, "appid": api_key, "units": "metric"}
 
     try:
         async with httpx.AsyncClient() as client:
@@ -35,15 +56,22 @@ async def get_openweathermap_data(city: str):
     except httpx.HTTPError:
         return None
 
-    return {
+    result = {
         "source": "openweather",
-        "temperature": data["main"]["temp"],
-        "humidity": data["main"]["humidity"],
-        "description": data["weather"][0]["description"]
+        "temperature": data.get("main", {}).get("temp"),
+        "humidity": data.get("main", {}).get("humidity"),
+        "description": data.get("weather", [{}])[0].get("description")
     }
+    set_to_cache(cache_key, result)
+    return result
 
-# 🔹 Open-Meteo (extrait uniquement pour usage dans l’agrégation)
+
 async def get_open_meteo_data(coords: dict, city: str):
+    cache_key = f"openmeteo::{city}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": coords["lat"],
@@ -59,38 +87,40 @@ async def get_open_meteo_data(coords: dict, city: str):
     except httpx.HTTPError:
         return None
 
-    if "current_weather" not in data:
+    current = data.get("current_weather")
+    if not current or current.get("temperature") is None:
         return None
 
-    return {
+    result = {
         "source": "open-meteo",
-        "temperature": data["current_weather"]["temperature"],
+        "temperature": current["temperature"],
         "humidity": None,
         "description": None,
-        "timestamp": data["current_weather"]["time"]
+        "timestamp": current.get("time"),
+        "wind_speed": current.get("windspeed")
     }
+    set_to_cache(cache_key, result)
+    return result
 
-# 🔹 1. Météo actuelle agrégée
+
 async def get_current_weather(city: str):
     coords = get_coordinates(city)
     if coords is None:
-        return None  # Ville non supportée
+        return None
 
-    # Appels parallèles aux deux services météo
     results = await asyncio.gather(
         get_open_meteo_data(coords, city),
         get_openweathermap_data(city),
         return_exceptions=True
     )
 
-    valid_results = [r for r in results if isinstance(r, dict)]
-
+    valid_results = [r for r in results if isinstance(r, dict) and r.get("temperature") is not None]
     if not valid_results:
         return None
 
-    # Moyenne de température entre les sources valides
     avg_temp = sum(r["temperature"] for r in valid_results) / len(valid_results)
     sources = [r["source"] for r in valid_results]
+    base = valid_results[0]
 
     return {
         "city": city,
@@ -98,14 +128,21 @@ async def get_current_weather(city: str):
             "current": round(avg_temp, 1),
             "unit": "celsius"
         },
-        "sources": sources
+        "sources": sources,
+        "timestamp": base.get("timestamp"),
+        "wind_speed": base.get("wind_speed")
     }
 
-# 🔹 2. Prévisions sur 5 jours
+
 async def get_forecast_weather(city: str):
     coords = get_coordinates(city)
     if coords is None:
         return None
+
+    cache_key = f"forecast::{city}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
 
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -128,22 +165,35 @@ async def get_forecast_weather(city: str):
 
     forecast = []
     for i in range(len(data["daily"]["time"])):
+        min_temp = data["daily"]["temperature_2m_min"][i]
+        max_temp = data["daily"]["temperature_2m_max"][i]
+
+        if min_temp is None or max_temp is None:
+            continue
+
         forecast.append({
             "date": data["daily"]["time"][i],
-            "temp_min": data["daily"]["temperature_2m_min"][i],
-            "temp_max": data["daily"]["temperature_2m_max"][i]
+            "temp_min": min_temp,
+            "temp_max": max_temp
         })
 
-    return {
+    result = {
         "city": city,
         "forecast": forecast
     }
+    set_to_cache(cache_key, result)
+    return result
 
-# 🔹 3. Historique sur 5 jours précédents
+
 async def get_historical_weather(city: str):
     coords = get_coordinates(city)
     if coords is None:
         return None
+
+    cache_key = f"history::{city}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
 
     end_date = datetime.today().date()
     start_date = end_date - timedelta(days=5)
@@ -171,13 +221,21 @@ async def get_historical_weather(city: str):
 
     history = []
     for i in range(len(data["daily"]["time"])):
+        min_temp = data["daily"]["temperature_2m_min"][i]
+        max_temp = data["daily"]["temperature_2m_max"][i]
+
+        if min_temp is None or max_temp is None:
+            continue
+
         history.append({
             "date": data["daily"]["time"][i],
-            "temp_min": data["daily"]["temperature_2m_min"][i],
-            "temp_max": data["daily"]["temperature_2m_max"][i]
+            "temp_min": min_temp,
+            "temp_max": max_temp
         })
 
-    return {
+    result = {
         "city": city,
         "history": history
     }
+    set_to_cache(cache_key, result)
+    return result
