@@ -18,15 +18,9 @@ Une API REST de météo utilisant **FastAPI**, interrogeant les services **Open-
 
 ##  Installation & Lancement
 
-# Cloner le repo
-git clone <url-du-repo>
-cd weather-api
-
-# Créer un fichier .env
-cp .env.example .env
-
 # Lancer le projet
-docker-compose up --build
+-> docker-compose up --build
+-> docker-compose down
 
 
 Accéder à l'API : [http://localhost:8000/docs](http://localhost:8000/docs)
@@ -63,14 +57,15 @@ Accéder à l'API : [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ### Lancer tous les tests unitaires et fonctionnels :
 
-
-pytest
-
+### Exécution des tests unitaires et de contrat :
+-> pytest
+#### Exécution des tests de charge avec Locust :
+-> locust -f locustfile.py
 
 ### Test de contrat JSON :
 
 
-pytest app/tests/test_contract.py
+-> pytest app/tests/test_contract.py
 
 
 
@@ -95,7 +90,7 @@ Dashboard exportable au format JSON depuis Grafana ⚙️ > Export
 ### Lancer le test locust :
 
 
-locust -f app/tests/locustfile.py --host=http://localhost:8000
+-> locust -f app/tests/locustfile.py --host=http://localhost:8000
 
 
 Puis ouvrir [http://localhost:8089](http://localhost:8089) dans le navigateur.
